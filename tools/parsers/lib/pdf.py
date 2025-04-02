@@ -1,7 +1,10 @@
 """Common PDF tools to be used in our scrapers."""
+import io
+from io import StringIO
 from io import BytesIO
 import typing
 from typing import BinaryIO, Iterator, Optional, Tuple
+from contextlib import closing
 
 import fitz
 import numpy as np
@@ -13,19 +16,39 @@ if typing.TYPE_CHECKING:
     from typing import Any
 
 
-def pdf2txt(pdf_file: BinaryIO, num_pages: Optional[int] = None) -> str:
-    """Read all text from a PDF."""
+# def pdf2txt(pdf_file: BinaryIO, num_pages: Optional[int] = None) -> str:
+#     """Read all text from a PDF."""
 
+#     rsrcmgr = PDFResourceManager()
+#     with BytesIO() as retstr:
+#         with TextConverter(rsrcmgr, retstr) as device:
+#             interpreter = PDFPageInterpreter(rsrcmgr, device)
+#             for index_page, page in enumerate(PDFPage.get_pages(pdf_file, check_extractable=True)):
+#                 if num_pages and index_page >= num_pages:
+#                     break
+#                 interpreter.process_page(page)
+#         text = retstr.getvalue()
+#         return text.decode('utf-8')
+
+
+
+def pdf2txt(body):
+    # If body isn't a BytesIO instance, wrap it.
+    if not isinstance(body, io.BytesIO):
+        body = io.BytesIO(body)
+    
     rsrcmgr = PDFResourceManager()
-    with BytesIO() as retstr:
-        with TextConverter(rsrcmgr, retstr) as device:
-            interpreter = PDFPageInterpreter(rsrcmgr, device)
-            for index_page, page in enumerate(PDFPage.get_pages(pdf_file, check_extractable=True)):
-                if num_pages and index_page >= num_pages:
-                    break
-                interpreter.process_page(page)
-        text = retstr.getvalue()
-        return text.decode('utf-8')
+    retstr = io.StringIO()
+    
+    with closing(TextConverter(rsrcmgr, retstr)) as device:
+        interpreter = PDFPageInterpreter(rsrcmgr, device)
+        # Use the body directly since it's already a BytesIO object
+        for page in PDFPage.get_pages(body):
+            interpreter.process_page(page)
+    
+    text = retstr.getvalue()
+    retstr.close()
+    return text
 
 
 def search_text(pdf_file: BinaryIO, needle: str) -> Iterator[Tuple[fitz.Rect, fitz.Page]]:
@@ -41,7 +64,7 @@ def list_images(pdf_file: BinaryIO) -> Iterator['np.ndarray[Any, Any]']:
     """List all images from a PDF."""
     pdf_doc = fitz.open('pdf', pdf_file)
     for page in pdf_doc:
-        for image in page.getImageList():
+        for image in page.get_images():
             xref = image[0]
             pix_image = fitz.Pixmap(pdf_doc, xref)
             numpy_array = np.frombuffer(pix_image.samples, dtype=np.uint8)  # type: ignore
@@ -55,8 +78,8 @@ def pdf2img(pdf_file: BinaryIO, page_num: int = 0):
         page = pdf_doc[page_num]
         rotate = int(0)
         zoom = 3
-        mat = fitz.Matrix(zoom, zoom).preRotate(rotate)
-        pix = page.getPixmap(matrix=mat, alpha=False)
+        mat = fitz.Matrix(zoom, zoom).prerotate(rotate)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
         numpy_array = np.frombuffer(pix.samples, dtype=np.uint8)
         numpy_array = numpy_array.reshape(pix.h, pix.w, pix.n)
         numpy_image = np.ascontiguousarray(numpy_array[..., [2, 1, 0]])  # rgb to bgr

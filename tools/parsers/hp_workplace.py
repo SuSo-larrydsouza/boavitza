@@ -96,6 +96,8 @@ def parse(body: BinaryIO, pdf_filename: str) -> Iterator[data.DeviceCarbonFootpr
         result['name']=result['name'].replace("HP ","")
     else:
         logging.error('The file "%s" did not match the HP pattern (no name extracted)', pdf_filename)
+        result['name'] = pdf_filename.split('/')[-1]  # Fallback to filename or another default value
+
     if not "category" in result:
             result['category'] = "Workplace"
             if 'screen_size' in extracted:
@@ -103,10 +105,24 @@ def parse(body: BinaryIO, pdf_filename: str) -> Iterator[data.DeviceCarbonFootpr
             else:
                 result['subcategory'] = "Workstation"
     if 'footprint_with_error' in extracted and 'tolerance' in extracted:
-        result['gwp_total'] = float(extracted['footprint_with_error'])
-        result['gwp_error_ratio'] = round((float(extracted['tolerance']) / result['gwp_total']), 4)
-    if 'footprint' in extracted:
-        result['gwp_total'] = float(extracted['footprint'])
+        try:
+            result['gwp_total'] = float(extracted['footprint_with_error'].strip())
+        except ValueError:
+            result['gwp_total'] = None
+        try:
+            result['gwp_error_ratio'] = round(float(extracted['tolerance'].strip()) / result['gwp_total'], 4) if result['gwp_total'] else None
+        except ValueError:
+            result['gwp_error_ratio'] = None
+    elif 'footprint' in extracted:
+        try:
+            result['gwp_total'] = float(extracted['footprint'].strip())
+        except ValueError:
+            result['gwp_total'] = None
+    else:
+        # Fallback when no footprint is found
+        logging.error('The file "%s" did not match the HP pattern (no footprint extracted)', pdf_filename)
+        result['gwp_total'] = None  # or you may choose to return/skip this file
+
     if 'date' in extracted:
         result['report_date'] = extracted['date']
     if 'weight' in extracted:
@@ -155,14 +171,21 @@ def parse(body: BinaryIO, pdf_filename: str) -> Iterator[data.DeviceCarbonFootpr
                 result['use_location']=extracted_temp['use_location']
                 break
     if 'energy_demand' in extracted:
-        result['yearly_tec'] = float(extracted['energy_demand'].replace(' ',''))
+        energy_demand_str = extracted['energy_demand'].strip()
+        if energy_demand_str:
+            result['yearly_tec'] = float(energy_demand_str)
+        else:
+            result['yearly_tec'] = None  # or a default value
     else:
         for block, page in pdf.search_text(body, 'energy demand'):
             temp_text = page.get_textbox((block.x0, block.y0 - 2, block.x1 + 150, block.y1 + 2))
             extracted_temp = text.search_all_patterns(_ENERGY_PATTERNS, temp_text)
             if 'energy_demand' in extracted_temp:
-                result['yearly_tec']=float(extracted_temp['energy_demand'])
-                break
+                energy_demand_str = extracted_temp['energy_demand'].strip()
+                if energy_demand_str:
+                    result['yearly_tec'] = float(energy_demand_str)
+                    break
+
     if 'gwp_manufacturing_ratio' in extracted:
         result['gwp_manufacturing_ratio'] = float(extracted['gwp_manufacturing_ratio'])/100
     if 'gwp_use_ratio' in extracted:
@@ -203,7 +226,7 @@ def parse(body: BinaryIO, pdf_filename: str) -> Iterator[data.DeviceCarbonFootpr
             result = unpie.append_to_boavizta(result, pie_data)
 
     # Apply some automatic fixes
-    if 'gwp_use_ratio' in result and 'yearly_tec' in result:
+    if 'gwp_use_ratio' in result and 'yearly_tec' in result and result.get('gwp_total'):
         # compute electricity factor assuming 100% of the 'use' phase comes from the electricity consumption,
         elec_factor = result['gwp_use_ratio'] * result['gwp_total'] / (result['lifetime'] * result['yearly_tec'])
         if math.isfinite(elec_factor):
