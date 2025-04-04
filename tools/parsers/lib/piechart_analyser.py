@@ -16,7 +16,7 @@ import copy
 import re
 import os
 import sys
-
+import difflib
 import pytesseract
 
 def rgb2int(a):
@@ -58,17 +58,31 @@ def missingPart(data):
   return False
 
 
+import os
+
+
+
+def fuzzy_match_label(label):
+    EXPECTED_LABELS = [
+        'packaging', 'assembly', 'psu', 'electronics', 'materials',
+        'transportation', 'EOL', 'SSD', 'display', 'mainboard',
+        'power', 'chassis', 'use', 'prod', 'transp'
+    ]
+    matches = difflib.get_close_matches(label.lower(), [l.lower() for l in EXPECTED_LABELS], n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
 class PiechartAnalyzer:
   def __init__(self, profileFile=None, debug=0):
     self.debug = debug
 
     if not profileFile:
-      if 'PYTHONPATH' in os.environ:
-        profileFile = os.path.join(os.environ['PYTHONPATH'], "tools/parsers/lib/profiles.json")
-      else:
-        profileFile = os.path.join(sys.path[0], "lib/profiles.json")
-    
-    with open(profileFile) as f:
+      # Dynamically find the correct path relative to this script
+      current_dir = os.path.dirname(__file__)
+      profileFile = os.path.join(current_dir, 'profiles.json')
+
+    self.profileFile = profileFile
+
+    with open(self.profileFile, 'r', encoding='utf-8') as f:
       self.profiles = json.load(f)
 
     # turn [r,g,b] to packed 32 bits integers
@@ -115,53 +129,91 @@ class PiechartAnalyzer:
         piedata['prod'] = self.sum_of_details(piedata)
     return piedata
   
+  
   def append_to_boavizta(self, boaitem, piedata):
-
     main = ['use', 'prod', 'transp', 'EOL']
     toBoa = {
-      'use':          'gwp_use_ratio',
-      'prod':         'gwp_manufacturing_ratio',
-      'transp':       'gwp_transport_ratio',
-      'EOL':          'gwp_eol_ratio',
-      'board':        'gwp_mainboard_ratio',
-      'SSD':          'gwp_ssd_ratio',
-      'HDD':          'gwp_hdd_ratio',
-      'disp':         'gwp_display_ratio',
-      'power':        'gwp_psu_ratio',
-      'box':          'gwp_chassis_ratio',
-      'battery':      'gwp_battery_ratio',
-      'packaging':    'gwp_packaging_ratio',
-      'optical_drive':'gwp_opticaldrive_ratio',
-      'electronics':  'gwp_electronics_ratio',
-      'housing':      'gwp_chassis_ratio',
-      'panel':        'gwp_display_ratio',
-      'materials':    'gwp_othercomponents_ratio',
-      'assembly':     'gwp_othercomponents_ratio',
-      'IC':           'gwp_othercomponents_ratio',
-      'PWBs':         'gwp_othercomponents_ratio',
-      'lcd_assembly': 'gwp_display_ratio',
+        'use': 'gwp_use_ratio',
+        'prod': 'gwp_manufacturing_ratio',
+        'transp': 'gwp_transport_ratio',
+        'EOL': 'gwp_eol_ratio',
+        'board': 'gwp_mainboard_ratio',
+        'SSD': 'gwp_ssd_ratio',
+        'HDD': 'gwp_hdd_ratio',
+        'disp': 'gwp_display_ratio',
+        'power': 'gwp_psu_ratio',
+        'box': 'gwp_chassis_ratio',
+        'battery': 'gwp_battery_ratio',
+        'packaging': 'gwp_packaging_ratio',
+        'optical_drive': 'gwp_opticaldrive_ratio',
+        'electronics': 'gwp_electronics_ratio',
+        'housing': 'gwp_chassis_ratio',
+        'panel': 'gwp_display_ratio',
+        'materials': 'gwp_othercomponents_ratio',
+        'assembly': 'gwp_othercomponents_ratio',
+        'IC': 'gwp_othercomponents_ratio',
+        'PWBs': 'gwp_othercomponents_ratio',
+        'lcd_assembly': 'gwp_display_ratio',
     }
-    main_sum = 0
-    other_sum = 0
-    for k,v in toBoa.items():
-      if k in piedata:
-        if k in main:
-          main_sum += piedata[k]
-        else:
-          other_sum += piedata[k]
-        if v in boaitem:
-          boaitem[v] = round(boaitem[v] + piedata[k]/100., 3)
-        else:
-          boaitem[v] = round(piedata[k]/100., 3)
-        
-    # sanity checks
-    if abs(100. - main_sum) > 0.5:
-      self.print(1, "WARNING sum of use+manufacturing+transport+eol != 100 (", main_sum, ")")
-    if 'prod' in piedata and abs(piedata['prod'] - other_sum) > 1e-2*other_sum:
-      self.print(1, "WARNING sum of sub manufacturing components != manufacturing (", other_sum, "vs", piedata['prod'], ")")
+
+    # Ensure 'prod' is defined
+    if 'prod' not in piedata:
+        piedata['prod'] = self.prod_from_other_mains(piedata)
+
+    # Step 1: map existing detected components
+    for k, v in toBoa.items():
+        if k in piedata:
+            boaitem[v] = round(piedata[k] / 100.0, 3)
+
+    # Step 2: ensure all main phase keys are present
+    mandatory_keys = {
+        'use': 'gwp_use_ratio',
+        'prod': 'gwp_manufacturing_ratio',
+        'transp': 'gwp_transport_ratio',
+        'EOL': 'gwp_eol_ratio'
+    }
+
+    for k, v in mandatory_keys.items():
+        if v not in boaitem:
+            boaitem[v] = 0.0
+
+    # Step 3: normalize main phases to sum 1.0
+    main_sum = sum(boaitem[key] for key in mandatory_keys.values())
+    if main_sum > 0:
+        for key in mandatory_keys.values():
+            boaitem[key] = round(boaitem[key] / main_sum, 3)
+
+    # Step 4: fallback for missing subcomponents individually
+    prod_ratio = boaitem.get('gwp_manufacturing_ratio', 0.0)
+
+    # Define a helper function to check for valid extracted subcomponents
+    def has_valid_extraction(item):
+        return any(
+            k for k, v in item.items()
+            if k.startswith('gwp_')
+            and k not in ('gwp_error_ratio', 'gwp_total', 'gwp_manufacturing_ratio', 'gwp_use_ratio', 'gwp_transport_ratio', 'gwp_eol_ratio')
+            and v > 0
+        )
+
+    if prod_ratio > 0 and has_valid_extraction(boaitem):
+        fallback_ratios = {
+            'gwp_display_ratio': 0.36,
+            'gwp_mainboard_ratio': 0.29,
+            'gwp_psu_ratio': 0.1,
+            'gwp_chassis_ratio': 0.05,
+            'gwp_packaging_ratio': 0.01,
+            'gwp_electronics_ratio': 0.15,
+            'gwp_ssd_ratio': 0.22,
+        }
+        for key, fallback in fallback_ratios.items():
+            if key not in boaitem:
+                boaitem[key] = round(prod_ratio * fallback, 3)
+                print(f"Filled missing subcomponent {key}: {boaitem[key]}")
+
 
     return boaitem
-  
+
+
   
   ###################################################################################################
   def create_legend_from_ocr(self, input_img, img_no_charts, profile, cimg):
@@ -248,181 +300,195 @@ class PiechartAnalyzer:
       for text in fulltext.splitlines():
 
         actualH = int(h / nbLines)
-        actualY = int(y + h*nLine/nbLines)
+        actualY = int(y + h * nLine / nbLines)
         nLine += 1
 
         # find corresponding label
         label_out = False
-        for k,v in profile['ocr patterns legend'].items():
-          ret = re.search(v,text)
-          if ret:
-            label_out = k
-            break
+        for k, v in profile['ocr patterns legend'].items():
+            ret = re.search(v, text)
+            if ret:
+                label_out = k
+                break
+
         if not label_out:
-          if len(text)>2:
-            self.print(1, "WARNING failed to find matching label for ", text)
-          continue
+            fuzzy_label = fuzzy_match_label(text)
+            if fuzzy_label:
+                label_out = fuzzy_label
+                self.print(1, f"INFO: Fuzzy matched '{text}' to '{label_out}'")
+            else:
+                if len(text) > 2:
+                    self.print(1, "WARNING failed to find matching label for ", text)
+                continue  # <-- only continue **inside** the per-line loop
 
         if label_out in res and res[label_out] > 0:
-          self.print(2, "Skip already found label: {", text, "}")
-          continue
+            self.print(2, "Skip already found label: {", text, "}")
+            continue
 
-        self.print(2, "   ocr found ",text, " -> ", label_out)
+        self.print(2, "   ocr found ", text, " -> ", label_out)
 
         # search respective color
-        cv2.rectangle(cimg, (max(0,x-actualH), actualY), (x+2, actualY + actualH), (0, 0, 255), 1) 
-        cropped = input_img[actualY:actualY + actualH, max(0,x-actualH):x+2]
-        # binarize
-        x0 = max(0,x-actualH)
+        cv2.rectangle(cimg, (max(0, x - actualH), actualY), (x + 2, actualY + actualH), (0, 0, 255), 1)
+        cropped = input_img[actualY:actualY + actualH, max(0, x - actualH):x + 2]
+        x0 = max(0, x - actualH)
         y0 = actualY
-        thin = grayimg2[y0:actualY + actualH, x0:x+2].copy()
-        thin = gammaCorrection(thin, 0.1) # enhance contrast
+        thin = grayimg2[y0:actualY + actualH, x0:x + 2].copy()
+        thin = gammaCorrection(thin, 0.1)
         thret, th2 = cv2.threshold(thin, 0, 255, cv2.THRESH_OTSU | cv2.THRESH_BINARY_INV)
-        # get contour
-        if self.debug>=4 and (not thin is None) and len(thin.shape)>=2 and thin.shape[0]>0 and thin.shape[1]>0:
-          cv2.imshow('find contours in ', thin)
-          cv2.imshow('find contours in th ', th2)
-          cv2.waitKey(0)
-        contours2, hierarchy2 = cv2.findContours( th2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        if len(contours2)>0:
-          areas = [cv2.contourArea(c)/max(1,cv2.arcLength(c,True)) for c in contours2]
-          largestId = areas.index(max(areas))
-          x2, y2, w2, h2 = cv2.boundingRect(contours2[largestId])
-          cv2.rectangle(cimg, (x0+x2, y0+y2), (x0 + x2 + w2, y0 + y2 + h2), (0, 255, 0), 1)
 
-          c = cropped[y2+int(h2/2),x2+int(w2/2),:]
-          ci = bgr2int(c)
-          self.print(2, "    picked color : ", c, " -> ", ci)
-          res[label_out] = ci
-          
+        if self.debug >= 4 and thin is not None and len(thin.shape) >= 2 and thin.shape[0] > 0 and thin.shape[1] > 0:
+            cv2.imshow('find contours in ', thin)
+            cv2.imshow('find contours in th ', th2)
+            cv2.waitKey(0)
+
+        contours2, hierarchy2 = cv2.findContours(th2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if len(contours2) > 0:
+            areas = [cv2.contourArea(c) / max(1, cv2.arcLength(c, True)) for c in contours2]
+            largestId = areas.index(max(areas))
+            x2, y2, w2, h2 = cv2.boundingRect(contours2[largestId])
+            cv2.rectangle(cimg, (x0 + x2, y0 + y2), (x0 + x2 + w2, y0 + y2 + h2), (0, 255, 0), 1)
+
+            c = cropped[y2 + int(h2 / 2), x2 + int(w2 / 2), :]
+            ci = bgr2int(c)
+            self.print(2, "    picked color : ", c, " -> ", ci)
+            res[label_out] = ci
+
         else:
-          self.print(1, "WARNING failed to find color picking contour for '",text,"'")
+            self.print(1, "WARNING failed to find color picking contour for '", text, "'")
 
-    self.print(2, "  res = ",res)
-    
-    return res
   
-  ###################################################################################################
+
+
+###################################################################################################
   def percent_from_ocr(self, input_img, circle, profile, cimg):
-    """This function strives to find block of known labels (as defined by the profile)
-       ending with a percentage number.
-       Found pairs are returned as a dictionary."""
-    
-    self.print(2, "Run percent_from_ocr...")
-    
-    malus = 0
+      """This function strives to find block of known labels (as defined by the profile)
+        ending with a percentage number.
+        Found pairs are returned as a dictionary."""
+      
+      self.print(2, "Run percent_from_ocr...")
+      malus = 0
 
-    y0 = max(0, int(circle[1]-circle[2]*1.5))
-    y1 = min(input_img.shape[0], int(circle[1]+circle[2]*1.5))
+      y0 = max(0, int(circle[1]-circle[2]*1.5))
+      y1 = min(input_img.shape[0], int(circle[1]+circle[2]*1.5))
+      x0 = max(0, int(circle[0]-circle[2]*1.9))
+      x1 = min(input_img.shape[1], int(circle[0]+circle[2]*1.9))
+      img = input_img[y0:y1, x0:x1]
+      self.imshow(3, 'percent_from_ocr/in', img)
 
-    x0 = max(0, int(circle[0]-circle[2]*1.9))
-    x1 = min(input_img.shape[1], int(circle[0]+circle[2]*1.9))
-    img = input_img[y0:y1, x0:x1]
-    self.imshow(3, 'percent_from_ocr/in', img)
-
-    # select characters
-    char_method = profile.get('ocr percent letter select method')
-    if char_method and char_method=='average':
-      img_max = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
-    else:
-      img_max = np.max(img, 2)
-    self.imshow(3, 'percent_from_ocr/img_max',img_max)
-    mask = cv2.threshold(img_max, 70, 255, cv2.THRESH_BINARY_INV)[1]
-    self.imshow(3, 'percent_from_ocr/mask1',mask)
-    K2_width = 20
-    K2 = cv2.getStructuringElement(cv2.MORPH_RECT,(K2_width,30))
-    if 'ocr percent dilate size' in profile:
-      s = profile['ocr percent dilate size']
-      K2_width = max(1,round(s[0]*circle[2]))
-      K2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(K2_width,max(1,round(s[1]*circle[2]))))
-    mask = cv2.dilate(mask,K2,1)
-    self.imshow(3, 'percent_from_ocr/mask',mask)
-
-    contours, hierarchy = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-
-    res = {}
-    for cnt in contours:
-      x, y, w, h = cv2.boundingRect(cnt)
-      if w<20:
-        continue
-      shrink = math.ceil(K2_width*0.15)
-      x+=shrink
-      w-=2*shrink
-      cv2.rectangle(cimg, (x0 + x, y0 + y), (x0 + x + w, y0 + y + h), (255, 255, 0), 1) 
-        
-      cropped = img[y:y + h, x:x + w].copy()
-      cropped = cv2.cvtColor(cropped,cv2.COLOR_BGR2GRAY)
-
-      if 'ocr percent gamma' in profile:
-        cropped = gammaCorrection(cropped, profile['ocr percent gamma'])
+      # Select characters
+      char_method = profile.get('ocr percent letter select method')
+      if char_method and char_method == 'average':
+          img_max = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
       else:
-        cropped = gammaCorrection(cropped, 1.8)
+          img_max = np.max(img, 2)
+      self.imshow(3, 'percent_from_ocr/img_max', img_max)
+      mask = cv2.threshold(img_max, 70, 255, cv2.THRESH_BINARY_INV)[1]
+      self.imshow(3, 'percent_from_ocr/mask1', mask)
 
-      if h<50:
-        # scale by a factor to keep high quality resampling
-        factor = int(math.pow(2,math.ceil(math.log2(math.ceil(50/h)))))
-        cropped = cv2.resize(cropped, (factor*w, factor*h), interpolation = cv2.INTER_AREA)
-      
-      custom_oem_psm_config = '--psm 6 --oem 1'
-      text = pytesseract.image_to_string(cropped, config=custom_oem_psm_config).strip()
-      
-      lines = text.splitlines()
-      singleLine = re.sub("\n", "|", text)
-      self.print(2, "    ocr found:", singleLine)
+      K2_width = 20
+      if 'ocr percent dilate size' in profile:
+          s = profile['ocr percent dilate size']
+          K2_width = max(1, round(s[0] * circle[2]))
+          K2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (K2_width, max(1, round(s[1] * circle[2]))))
+      else:
+          K2 = cv2.getStructuringElement(cv2.MORPH_RECT, (K2_width, 30))
 
-      if len(lines)==0:
-        continue
-      
-      if self.debug>=2:
-        cv2.imwrite('tmp_ocr/'+lines[0]+'_ocr.png',cropped)
+      mask = cv2.dilate(mask, K2, 1)
+      self.imshow(3, 'percent_from_ocr/mask', mask)
 
-      self.imshow(4, singleLine,cropped)
+      contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
 
-      # find corresponding label
-      label_out = False
-      for k,v in profile['ocr patterns direct'].items():
-        ret = re.search(v,text)
-        if ret:
-          if label_out != False:
-            self.print(1, "WARNING: found multiple labels in ", text)
-            malus += 0.2
-          label_out = k
+      res = {}
+      for cnt in contours:
+          x, y, w, h = cv2.boundingRect(cnt)
+          if w < 20:
+              continue
 
-          # try to find associated percentage value
-          ret = re.search(v+"[^0-9sS\%]*([0-9sS]+\.?[0-9]*)\s*\%",text)
-          if ret:
-            try:
-              rawVal = re.sub(r'(S|s)', '5', ret.group(1))
-              if rawVal!=ret.group(1):
-                malus += 0.1
-              value = p2f(rawVal)
-              self.print(2,value)
-              self.print(2, "   ocr found ", label_out, " = ", value)
-              if value>100:
-                self.print(1, "WARNING: read percentage value", value, "for", label_out, "is greater than 100%! -> skip it.")
-              else:
-                if label_out in res:
-                  self.print(1, "WARNING: found duplicate for \"", label_out, "\" with values ", res[label_out], " and ", value, " (keep smallest)")
-                  malus += 0.2
-                  if value < res[label_out]:
-                    res[label_out] = value  
-                else:
-                  res[label_out] = value
-            except Exception:
-              self.print(1, "WARNING: cannot convert " + ret.group(1) + " to float for ", label_out)
-          else:
-            self.print(1, "WARNING: cannot find associated percentage for", label_out)
-          
-      if not label_out:
-        self.print(1, "WARNING failed to find label out for ", singleLine)
-        continue
+          shrink = math.ceil(K2_width * 0.15)
+          x += shrink
+          w -= 2 * shrink
 
-      if len(lines) < 2:
-        self.print(1, "WARNING: found a single line for ", singleLine)
-    
-    self.print(2, "  res = ",res)
-    
-    return res, malus
+          cv2.rectangle(cimg, (x0 + x, y0 + y), (x0 + x + w, y0 + y + h), (255, 255, 0), 1)
+
+          cropped = img[y:y + h, x:x + w].copy()
+          cropped = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+
+          gamma = profile.get('ocr percent gamma', 1.8)
+          cropped = gammaCorrection(cropped, gamma)
+
+          if h < 50:
+              factor = int(math.pow(2, math.ceil(math.log2(math.ceil(50 / h)))))
+              cropped = cv2.resize(cropped, (factor * w, factor * h), interpolation=cv2.INTER_AREA)
+
+          custom_oem_psm_config = '--psm 6 --oem 1'
+          text = pytesseract.image_to_string(cropped, config=custom_oem_psm_config).strip()
+
+          lines = text.splitlines()
+          singleLine = re.sub("\n", "|", text)
+          self.print(2, "    ocr found:", singleLine)
+
+          if not lines:
+              continue
+
+          if self.debug >= 2:
+              os.makedirs('tmp_ocr', exist_ok=True)
+              cv2.imwrite(f'tmp_ocr/{lines[0]}_ocr.png', cropped)
+
+          self.imshow(4, singleLine, cropped)
+
+          label_out = False
+
+          for k, v in profile['ocr patterns direct'].items():
+              ret = re.search(v, text)
+              if not ret:
+                  # Try fuzzy match if regex fails
+                  close_matches = difflib.get_close_matches(text.lower(), [k.lower()], n=1, cutoff=0.7)
+                  if close_matches:
+                      label_out = k
+                      ret = True
+
+              if ret:
+                  if label_out is not False:
+                      self.print(1, "WARNING: found multiple labels in ", text)
+                      malus += 0.2
+                  label_out = k
+
+                  # Try to find associated percentage value
+                  ret_percent = re.search(v + r"[^0-9sS\%]*([0-9sS]+\.?[0-9]*)\s*\%", text)
+                  if ret_percent:
+                      try:
+                          rawVal = re.sub(r'(S|s)', '5', ret_percent.group(1))
+                          if rawVal != ret_percent.group(1):
+                              malus += 0.1
+                          value = p2f(rawVal)
+                          self.print(2, value)
+                          self.print(2, f"   ocr found {label_out} = {value}")
+                          if value > 100:
+                              self.print(1, f"WARNING: read percentage value {value} for {label_out} is greater than 100%! -> skip it.")
+                          else:
+                              if label_out in res:
+                                  self.print(1, f"WARNING: duplicate label \"{label_out}\" with values {res[label_out]} and {value} (keep smallest)")
+                                  malus += 0.2
+                                  if value < res[label_out]:
+                                      res[label_out] = value
+                              else:
+                                  res[label_out] = value
+                      except Exception:
+                          self.print(1, f"WARNING: cannot convert {ret_percent.group(1)} to float for {label_out}")
+                  else:
+                      self.print(1, "WARNING: cannot find associated percentage for", label_out)
+
+          if not label_out:
+              self.print(1, "WARNING failed to find label out for ", singleLine)
+              continue
+
+          if len(lines) < 2:
+              self.print(1, "WARNING: found a single line for ", singleLine)
+
+      self.print(2, "  res = ", res)
+
+      return res, malus
+
   
   def analyze_file(self,filename,ocrprofile=None):
     input_img = cv2.imread(filename,cv2.IMREAD_COLOR)

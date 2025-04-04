@@ -32,7 +32,7 @@ if typing.TYPE_CHECKING:
 
 
 
-def pdf2txt(body):
+def pdf2txt(body, num_pages=None):
     # If body isn't a BytesIO instance, wrap it.
     if not isinstance(body, io.BytesIO):
         body = io.BytesIO(body)
@@ -42,13 +42,17 @@ def pdf2txt(body):
     
     with closing(TextConverter(rsrcmgr, retstr)) as device:
         interpreter = PDFPageInterpreter(rsrcmgr, device)
-        # Use the body directly since it's already a BytesIO object
-        for page in PDFPage.get_pages(body):
+        
+        # Iterate over pages, limit by num_pages if provided
+        for page_num, page in enumerate(PDFPage.get_pages(body)):
+            if num_pages is not None and page_num >= num_pages:
+                break
             interpreter.process_page(page)
     
     text = retstr.getvalue()
     retstr.close()
     return text
+
 
 
 def search_text(pdf_file: BinaryIO, needle: str) -> Iterator[Tuple[fitz.Rect, fitz.Page]]:

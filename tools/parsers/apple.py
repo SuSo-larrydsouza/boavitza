@@ -104,12 +104,24 @@ def parse(body: BinaryIO, pdf_filename: str) -> Iterator[data.DeviceCarbonFootpr
         result['screen_size'] = float(extracted['screen_size'])
     if 'assembly_location' in extracted:
         result['assembly_location'] = extracted['assembly_location']
+
     if 'lifetime' in extracted:
         lifetime = extracted['lifetime']
-        if numeric_lifetime := _ENGLISH_TO_NUMERIC.get(lifetime):
-            result['lifetime'] = numeric_lifetime
+        found_numbers = [number for word, number in _ENGLISH_TO_NUMERIC.items() if word in lifetime.lower()]
+        
+        if not found_numbers:
+            # Also try extracting numbers via regex
+            found_numbers = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", lifetime)]
+        
+        if found_numbers:
+            result['lifetime'] = int(round(max(found_numbers)))
         else:
-            raise ValueError(f'Could not convert "{lifetime}" to a numeric value')
+            result['lifetime'] = None
+        if found_numbers:
+            print("DEBUG Apple lifetime found_numbers:", found_numbers)
+            result['lifetime'] = int(round(max(found_numbers)))
+
+
     result['use_location'] = "WW"
     if 'gwp_manufacturing_ratio' in extracted:
         result['gwp_manufacturing_ratio'] = round(float(extracted['gwp_manufacturing_ratio'])/100,3)

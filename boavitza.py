@@ -7,7 +7,7 @@ import math
 st.set_page_config(layout="wide")
 
 # Read the CSV file
-file = "/Users/larrydsouza/Documents/Boavitza/boavitza/new_lenovo.csv"
+file = "/Users/larrydsouza/Documents/Boavitza/boavitza/new_hp.csv"
 open_file = pd.read_csv(file)
 open_file["gwp_total"] = pd.to_numeric(open_file["gwp_total"], errors='coerce')
 
@@ -29,7 +29,15 @@ table_options = {
 selected_table = st.selectbox("Select a table type", options=table_options)
 data_table = table_options[selected_table]
 
-mean_pcf = math.ceil(data_table["gwp_total"].mean())
+
+data_table["gwp_total"] = pd.to_numeric(data_table["gwp_total"], errors='coerce')
+
+data_table["gwp_manufacturing_ratio"] = pd.to_numeric(data_table["gwp_manufacturing_ratio"], errors='coerce')
+
+
+mean_value = data_table["gwp_total"].mean()
+mean_pcf = math.ceil(mean_value) if pd.notnull(mean_value) else 0
+
 st.metric("Mean Total PCF",mean_pcf)
 
 col1, col2, col3 = st.columns([1,1,1])

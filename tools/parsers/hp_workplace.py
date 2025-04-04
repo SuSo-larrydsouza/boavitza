@@ -200,19 +200,32 @@ def parse(body: BinaryIO, pdf_filename: str) -> Iterator[data.DeviceCarbonFootpr
     result['add_method'] = "HP Auto Parser"
     result['manufacturer'] = "HP"
 
-    if not 'gwp_use_ratio' in extracted:
+    needed_ratios = [
+        'gwp_manufacturing_ratio',
+        'gwp_use_ratio',
+        'gwp_eol_ratio',
+        'gwp_transport_ratio',
+        'gwp_chassis_ratio',
+        'gwp_display_ratio',
+        'gwp_electronics_ratio',
+        'gwp_packaging_ratio',
+        'gwp_psu_ratio',
+    ]
+
+    if not all(key in result for key in needed_ratios):
         unpie = piechart_analyser.PiechartAnalyzer(debug=0)
 
         pie_data: Dict[str, Any] = {}
         for image in pdf.list_images(body):
             md5 = hashlib.md5(image).hexdigest()
-            if (md5 == 'aa44d95aad83a5871bd7974cafd63a06'):
+            if md5 == 'aa44d95aad83a5871bd7974cafd63a06':
                 continue
             unpie_output = unpie.analyze(image, ocrprofile='HP')
             if unpie_output and len(unpie_output.keys()) > len(pie_data.keys()):
                 pie_data = unpie_output
                 if 'use' in pie_data:
                     break
+
         if not pie_data:
             # try with full page rendering
             image = pdf.pdf2img(body, 0)
@@ -220,10 +233,15 @@ def parse(body: BinaryIO, pdf_filename: str) -> Iterator[data.DeviceCarbonFootpr
             bottom_half = image[int(rows/2):, :, :].copy()
             pie_data = unpie.analyze(bottom_half, ocrprofile='HP')
         
-        if pie_data:
-            if not 'prod' in pie_data:
-                pie_data = unpie.auto_prod(pie_data)
+        # Even if pie_data is partially filled, try to complete it
+        if not 'prod' in pie_data:
+            pie_data = unpie.auto_prod(pie_data)
+
+        # Only update result if pie_data has meaningful entries
+        if any(value > 0 for value in pie_data.values() if isinstance(value, (int, float))):
             result = unpie.append_to_boavizta(result, pie_data)
+
+
 
     # Apply some automatic fixes
     if 'gwp_use_ratio' in result and 'yearly_tec' in result and result.get('gwp_total'):
