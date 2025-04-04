@@ -47,64 +47,124 @@ _CATEGORIES = {
 }
 
 
+# class LenovoSpider(spider.BoaViztaSpider):
+
+#     name = 'Lenovo'
+
+#     start_urls = [_INDEX_PAGE_URL]
+
+#     def parse(self, response: http.Response, **unused_kwargs: Any) -> Iterator[scrapy.Request]:
+#         """Parse the Lenovo ECO Declarations index page."""
+#         src_descriptor = 'script::attr(src)'
+#         for sript_link in response.css(src_descriptor):
+#             script_url = response.urljoin(sript_link.extract())
+#             if script_url.endswith('eco-declaration/main.js'):
+#                 yield scrapy.Request(script_url, callback=self.parse_index_main_js)
+#                 break
+    
+
+#     def parse_index_main_js(
+#         self, response: http.Response, **unused_kwargs: Any,
+#     ) -> Iterator[scrapy.Request]:
+#         """Parse the Lenovo javascript file listing all PDF documents."""
+
+#         # List existing tabs with their IDs.
+#         # The list of the tabs is as the top of the file which contains title like
+#         # "Notebooks & Ultrabooks", "Desktop & All-in-Ones".
+#         tab_titles = {
+#             match.group('tab_id'): html.unescape(match.group('title'))
+#             for match in _TAB_NAMES_IN_MAIN_JS_PATTERN.finditer(response.text)
+#         }
+
+#         # The link to various models grouped into tabs.
+#         tab_contents = response.text.split('"tab-pane')[1:]
+#         for tab_content in tab_contents:
+#             first_line = tab_content.split('\n', 1)[0]
+#             if 'role="tabpanel"' not in first_line:
+#                 continue
+#             tab_id_match = _ID_ATTR_PATTERN.search(first_line)
+#             if not tab_id_match:
+#                 continue
+#             tab_id = tab_id_match.group(1)
+#             tab_title = tab_titles[tab_id]
+
+#             for match in _PCF_LINK_IN_MAIN_JS_PATTERN.finditer(tab_content):
+#                 pcf_url = match.group(1)
+#                 if self._should_skip(pcf_url):
+#                     continue
+#                 if (not 'http:' in pcf_url) and (not 'https:' in pcf_url):
+#                     pcf_url="https:" + pcf_url
+#                 yield scrapy.Request(
+#                     pcf_url, callback=self.parse_carbon_footprint,
+#                     cb_kwargs={'tab_title': tab_title})
+
+#     def parse_carbon_footprint(
+#         self, response: http.Response, tab_title: str, **unused_kwargs: Any,
+#     ) -> Iterator[Any]:
+#         for device in lenovo.parse(io.BytesIO(response.body), response.url):
+#             device.data['sources'] = response.url
+#             device.data['sources_hash']=data.md5(io.BytesIO(response.body))
+#             for keyword, category_and_sub in _CATEGORIES.items():
+#                 if keyword in tab_title:
+#                     device.data['category'], device.data['subcategory'] = category_and_sub
+#                     break
+#             yield device.reorder().data
+
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+import time
+
 class LenovoSpider(spider.BoaViztaSpider):
-
     name = 'Lenovo'
-
     start_urls = [_INDEX_PAGE_URL]
 
-    def parse(self, response: http.Response, **unused_kwargs: Any) -> Iterator[scrapy.Request]:
-        """Parse the Lenovo ECO Declarations index page."""
-        src_descriptor = 'script::attr(src)'
-        for sript_link in response.css(src_descriptor):
-            script_url = response.urljoin(sript_link.extract())
-            if script_url.endswith('eco-declaration/main.js'):
-                yield scrapy.Request(script_url, callback=self.parse_index_main_js)
-                break
+    def parse(self, response, **unused_kwargs):
+        self.logger.info(f"Visited {response.url}")
 
-    def parse_index_main_js(
-        self, response: http.Response, **unused_kwargs: Any,
-    ) -> Iterator[scrapy.Request]:
-        """Parse the Lenovo javascript file listing all PDF documents."""
+        # Set up Selenium browser
+        chrome_options = Options()
+        chrome_options.binary_location = '/Applications/Chromium.app/Contents/MacOS/Chromium'  # adjust if needed
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        browser = webdriver.Chrome(options=chrome_options)
 
-        # List existing tabs with their IDs.
-        # The list of the tabs is as the top of the file which contains title like
-        # "Notebooks & Ultrabooks", "Desktop & All-in-Ones".
-        tab_titles = {
-            match.group('tab_id'): html.unescape(match.group('title'))
-            for match in _TAB_NAMES_IN_MAIN_JS_PATTERN.finditer(response.text)
-        }
+        browser.get(response.url)
 
-        # The link to various models grouped into tabs.
-        tab_contents = response.text.split('"tab-pane')[1:]
-        for tab_content in tab_contents:
-            first_line = tab_content.split('\n', 1)[0]
-            if 'role="tabpanel"' not in first_line:
+        # Wait for JS to load
+        time.sleep(3)
+
+        # Accept cookies if button exists
+        try:
+            cookie_button = browser.find_element(By.ID, "onetrust-accept-btn-handler")
+            cookie_button.click()
+            time.sleep(1)
+        except Exception:
+            pass  # No cookie banner
+
+        # Get all PDF links
+        links = browser.find_elements(By.CSS_SELECTOR, "a.fbox")
+
+        self.logger.info(f"Found {len(links)} links!")
+    
+    
+
+        for link in links:
+            href = link.get_attribute("href")
+            if self._should_skip(href):
                 continue
-            tab_id_match = _ID_ATTR_PATTERN.search(first_line)
-            if not tab_id_match:
-                continue
-            tab_id = tab_id_match.group(1)
-            tab_title = tab_titles[tab_id]
+            yield scrapy.Request(
+                href,
+                callback=self.parse_carbon_footprint
+            )
 
-            for match in _PCF_LINK_IN_MAIN_JS_PATTERN.finditer(tab_content):
-                pcf_url = match.group(1)
-                if self._should_skip(pcf_url):
-                    continue
-                if (not 'http:' in pcf_url) and (not 'https:' in pcf_url):
-                    pcf_url="https:" + pcf_url
-                yield scrapy.Request(
-                    pcf_url, callback=self.parse_carbon_footprint,
-                    cb_kwargs={'tab_title': tab_title})
+        browser.quit()
 
-    def parse_carbon_footprint(
-        self, response: http.Response, tab_title: str, **unused_kwargs: Any,
-    ) -> Iterator[Any]:
+    def parse_carbon_footprint(self, response):
         for device in lenovo.parse(io.BytesIO(response.body), response.url):
             device.data['sources'] = response.url
-            device.data['sources_hash']=data.md5(io.BytesIO(response.body))
-            for keyword, category_and_sub in _CATEGORIES.items():
-                if keyword in tab_title:
-                    device.data['category'], device.data['subcategory'] = category_and_sub
-                    break
+            device.data['sources_hash'] = data.md5(io.BytesIO(response.body))
             yield device.reorder().data
+
